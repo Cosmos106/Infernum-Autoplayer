@@ -1,5 +1,4 @@
 -- Autoplayer API + Infernum UI Integrated  
--- Backend by Kawi | UI by Infernum  
   
 local ENV = (type(getgenv) == "function" and getgenv()) or (type(getfenv) == "function" and getfenv()) or _G
 local global = ENV  
@@ -14,11 +13,6 @@ if global[key] then
 else  
 	settings = {  
 		Version = "2.0",  
-  
-		Author = {  
-			DiscordServer = "https://discord.gg/4bexJD6WVT",  
-			Discord = "@its_kawi"  
-		},  
   
 		AutoPlay = false,  
 		CopyEnemyNotes = false,  
@@ -528,10 +522,14 @@ end
 		display.KPS = KPS  
 	end  
   
-	local function hitLane(laneIndex, duration)  
+	local function hitLane(laneIndex, duration, isHold)  
 		duration = duration or 0  
+		isHold = isHold == true  
   
-		if laneStates[laneIndex] then  
+		-- Only a detected long note may keep the lane held.  
+		-- Normal notes always receive a fresh press edge, even when  
+		-- HoldDuration.Value is non-zero.  
+		if laneStates[laneIndex] and not isHold then  
 			fireLane(laneIndex, false)  
 			laneStates[laneIndex] = false  
 		end  
@@ -541,8 +539,10 @@ end
 			laneIndex  
 		)  
   
-		fireLane(laneIndex, true)  
-		laneStates[laneIndex] = true  
+		if not laneStates[laneIndex] then  
+			fireLane(laneIndex, true)  
+			laneStates[laneIndex] = true  
+		end  
   
 		laneHitIndexes[laneIndex] =  
 			(laneHitIndexes[laneIndex] or -1) + 1  
@@ -577,7 +577,8 @@ end
 	local function tryHitLane(  
 		laneIndex,  
 		duration,  
-		skipWait  
+		skipWait,  
+		isHold  
 	)  
 		local current = tick()  
   
@@ -598,15 +599,17 @@ end
 			spawn(  
 				hitLane,  
 				laneIndex,  
-				duration  
+				duration,  
+				isHold  
 			)  
 		else  
 			hitLane(  
 				laneIndex,  
-				duration  
+				duration,  
+				isHold  
 			)  
 		end  
-  
+
 		return true  
 	end  
   
@@ -1248,12 +1251,11 @@ end
 			local sve =  
 				settings.SVEnabled  
   
-			doSV =  
-				actions  
-				and actions[1]  
-				and actions[2]  
-				or not actions  
-				and isSV  
+			doSV =
+				actions
+				and (actions[1] or actions[2])
+				or not actions
+				and isSV
 				and sve  
   
 			ch = newChances  
@@ -1400,32 +1402,38 @@ end
 					rolled == "Sick"  
 					or rolled == "FSick"  
   
-				if doSV or modChart then  
-					if behind and sick then  
-						return true,  
-							true,  
-							dist,  
-							false,  
-							false  
-					end  
-  
-					-- SV charts use the normal hit window after distance is normalized
-					-- by the lane's current visual scroll speed.
-					return rolled ~= "Miss"  
-						and (  
-							sick  
-							and dist <= sickOffset2  
-							or dist <= note.HitDistance  
-						),  
-						false,  
-						dist,  
-						sick,  
-						forceSick  
-							or modChart  
-							and 0.25  
+				if doSV then
+					return rolled ~= "Miss"
+						and (
+							sick
+							and dist <= sickOffset2
+							or dist <= note.HitDistance
+						),
+						false,
+						dist,
+						sick,
+						forceSick
+				elseif modChart then
+					if behind and sick then
+						return true,
+							true,
+							dist,
+							false,
+							false
+					end
+
+					return rolled ~= "Miss"
+						and (
+							sick
+							and dist <= sickOffset2
+							or dist <= note.HitDistance
+						),
+						false,
+						dist,
+						sick,
+						forceSick
 							or 0
-					end  
-				else  
+				else
 					if behind then  
 						return dist <= badOffset,  
 							true,  
@@ -1682,7 +1690,8 @@ end
 				tryHitLane(  
 					data.LaneIndex,  
 					time,  
-					holdTime == 0  
+					holdTime == 0,  
+					holdTime > 0  
 				)  
   
 			if success then  
@@ -2041,12 +2050,12 @@ end
 			append(  
 				lane.ScrollSpeedBuffer,  
 				rawSpeed,  
-				estFps  
-					/ (  
-						doSV  
-						and 10  
-						or 2  
-					)  
+				estFps
+				/ (
+					doSV
+					and 10
+					or 2
+				)  
 			)  
   
 		globalScrollSpeed =  
@@ -2096,18 +2105,23 @@ end
   
 			local first = true  
   
-			while wait(0.05)  
-				and re:Wait()  
-				and settings.Playing  
-				and not actions  
+			while wait(0.05)
+			and re:Wait()
+			and settings.Playing
+			and not actions  
 			do  
-				local jump = 1  
-				if lastGlobal > 0 and globalScrollSpeed > 0 then  
-					jump = globalScrollSpeed / lastGlobal  
-				end  
-  
-				lastGlobal =  
-					globalScrollSpeed  
+				local jump = 1
+
+			if lastGlobal > 0
+				and globalScrollSpeed > 0
+			then
+				jump =
+					globalScrollSpeed
+					/ lastGlobal
+			end
+
+			lastGlobal =
+				globalScrollSpeed  
   
 				globalScrollSpeedBuffer =  
 					{ }  
@@ -2119,8 +2133,9 @@ end
 							1,  
 							0.67  
 						)  
-					and rendered / lastGlobal  
-						< 175 * rate  
+					and lastGlobal > 0
+					and rendered / lastGlobal
+					< 175 * rate  
 				then  
 					spawn(  
 						SVDTC,  
