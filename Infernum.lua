@@ -498,121 +498,149 @@ end
 		end  
 	end  
   
-	local laneStates = { }  
-	local laneHitIndexes = { }  
-	local perLaneKPS = { }  
-  
-	local KPS = 0  
-	local lastKeyHit = 0  
-  
-	local function appendKPS(lane)  
-		lastKeyHit = tick()  
-  
-		KPS += 1  
-		perLaneKPS[lane] =  
-			(perLaneKPS[lane] or 0) + 1  
-  
-		display.KPS = KPS  
-  
-		wait(1)  
-  
-		KPS -= 1  
-		perLaneKPS[lane] -= 1  
-  
-		display.KPS = KPS  
-	end  
-  
-	local function hitLane(laneIndex, duration, isHold)  
-		duration = duration or 0  
-		isHold = isHold == true  
-  
-		-- Only a detected long note may keep the lane held.  
-		-- Normal notes always receive a fresh press edge, even when  
-		-- HoldDuration.Value is non-zero.  
-		if laneStates[laneIndex] and not isHold then  
-			fireLane(laneIndex, false)  
-			laneStates[laneIndex] = false  
-		end  
-  
-		spawn(  
-			appendKPS,  
-			laneIndex  
-		)  
-  
-		if not laneStates[laneIndex] then  
-			fireLane(laneIndex, true)  
-			laneStates[laneIndex] = true  
-		end  
-  
-		laneHitIndexes[laneIndex] =  
-			(laneHitIndexes[laneIndex] or -1) + 1  
-  
-		local myIndex =  
-			laneHitIndexes[laneIndex]  
-  
-		if duration > 0 then  
-			wait(duration)  
-		end  
-  
-		if laneHitIndexes[laneIndex] == myIndex then  
-			fireLane(laneIndex, false)  
-			laneStates[laneIndex] = false  
-		end  
-	end  
-  
-	local kpsBuffers = { }  
-  
-	local kpsK, kpsG =  
-		settings.KPS.PerKey,  
-		settings.KPS.Global  
-  
-	if kpsK == 0 then  
-		kpsK = inf  
-	end  
-  
-	if kpsG == 0 then  
-		kpsG = inf  
-	end  
-  
-	local function tryHitLane(  
-		laneIndex,  
-		duration,  
-		skipWait,  
-		isHold  
-	)  
-		local current = tick()  
-  
-		if  
-			(perLaneKPS[laneIndex] or 0)  
-				<= round(kpsK / 1.2)  
-			and current  
-				- (kpsBuffers[laneIndex] or 0)  
-				< 1 / kpsK  
-			or kpsG < KPS  
-		then  
-			return false  
-		end  
-  
-		kpsBuffers[laneIndex] = current  
-  
-		if skipWait then  
-			spawn(  
-				hitLane,  
-				laneIndex,  
-				duration,  
-				isHold  
-			)  
-		else  
-			hitLane(  
-				laneIndex,  
-				duration,  
-				isHold  
-			)  
-		end  
+	local laneStates = { }
+	local normalOwners = { }
+	local holdOwners = { }
+	local ownerCounters = { }
+	local perLaneKPS = { }
 
-		return true  
-	end  
-  
+	local KPS = 0
+	local lastKeyHit = 0
+
+	local function appendKPS(lane)
+		lastKeyHit = tick()
+
+		KPS += 1
+		perLaneKPS[lane] = (perLaneKPS[lane] or 0) + 1
+		display.KPS = KPS
+		wait(1)
+		KPS -= 1
+		perLaneKPS[lane] -= 1
+		display.KPS = KPS
+	end
+
+	-- Separate ownership for normal notes and long notes.
+	-- Holds use their own owner objects and are released by the actual
+	-- hold object's lifecycle, never by HoldDuration.
+	local function newOwner(laneIndex, note, kind)
+		ownerCounters[laneIndex] =
+			(ownerCounters[laneIndex] or 0) + 1
+
+		return {
+			Id = ownerCounters[laneIndex],
+			Note = note,
+			Kind = kind
+		}
+	end
+
+	local function releaseHold(laneIndex, owner)
+		if holdOwners[laneIndex] ~= owner then
+			return
+		end
+
+		holdOwners[laneIndex] = nil
+
+		if laneStates[laneIndex] then
+			fireLane(laneIndex, false)
+			laneStates[laneIndex] = false
+		end
+	end
+
+	-- Force an exact key-up/key-down handoff for consecutive holds.
+	-- This is intentionally separate from hold-duration calculation.
+	local function startHold(laneIndex, note)
+		local oldHold = holdOwners[laneIndex]
+		if oldHold then
+			releaseHold(laneIndex, oldHold)
+		elseif laneStates[laneIndex] then
+			fireLane(laneIndex, false)
+			laneStates[laneIndex] = false
+		end
+
+		local owner = newOwner(laneIndex, note, "Hold")
+		holdOwners[laneIndex] = owner
+		normalOwners[laneIndex] = nil
+
+		fireLane(laneIndex, true)
+		laneStates[laneIndex] = true
+		return owner
+	end
+
+	local function hitLane(laneIndex, duration, isHold, note)
+		duration = duration or 0
+		isHold = isHold == true
+
+		spawn(appendKPS, laneIndex)
+
+		if isHold then
+			return startHold(laneIndex, note)
+		end
+
+		-- A normal note inside an active hold does not steal or release it.
+		if holdOwners[laneIndex] then
+			return holdOwners[laneIndex]
+		end
+
+		-- NORMAL NOTE TAP FIX:
+		-- Every normal note gets a fresh key-down edge. If the previous
+		-- normal tap is still physically down, release it immediately
+		-- before pressing the new note. The previous task is still allowed
+		-- to finish, but its owner is no longer current, so it cannot
+		-- release the newer tap. This prevents dense notes from becoming
+		-- one long key press and greatly improves repeated-note animation.
+		local oldNormal = normalOwners[laneIndex]
+		if oldNormal then
+			normalOwners[laneIndex] = nil
+			if laneStates[laneIndex] then
+				fireLane(laneIndex, false)
+				laneStates[laneIndex] = false
+			end
+		end
+
+		local owner = newOwner(laneIndex, note, "Normal")
+		normalOwners[laneIndex] = owner
+
+		fireLane(laneIndex, true)
+		laneStates[laneIndex] = true
+
+		if duration > 0 then
+			wait(duration)
+		end
+
+		-- Only the exact normal-note owner may release this tap.
+		if normalOwners[laneIndex] == owner
+			and not holdOwners[laneIndex]
+		then
+			fireLane(laneIndex, false)
+			laneStates[laneIndex] = false
+			normalOwners[laneIndex] = nil
+		end
+
+		return owner
+	end
+
+	local kpsBuffers = { }
+
+	local kpsK, kpsG = settings.KPS.PerKey, settings.KPS.Global
+	if kpsK == 0 then kpsK = inf end
+	if kpsG == 0 then kpsG = inf end
+
+	local function tryHitLane(laneIndex, duration, skipWait, isHold, note)
+		local current = tick()
+		if (perLaneKPS[laneIndex] or 0) <= round(kpsK / 1.2)
+			and current - (kpsBuffers[laneIndex] or 0) < 1 / kpsK
+			or kpsG < KPS then
+			return false
+		end
+		kpsBuffers[laneIndex] = current
+		if skipWait then
+			spawn(hitLane, laneIndex, duration, isHold, note)
+		else
+			hitLane(laneIndex, duration, isHold, note)
+		end
+		return true
+	end
+
 	local function waitForChildError(  
 		object,  
 		childName,  
@@ -1657,6 +1685,7 @@ end
 				Note,  
 				data  
 			)  
+		local isHold = holdTime > 0
   
 		note.Hit = true  
   
@@ -1690,8 +1719,9 @@ end
 				tryHitLane(  
 					data.LaneIndex,  
 					time,  
-					holdTime == 0,  
-					holdTime > 0  
+					not isHold,  
+					isHold,
+					Note
 				)  
   
 			if success then  
@@ -1699,6 +1729,65 @@ end
 			end  
   
 			wait()  
+		end  
+
+		-- Release a hold from the actual visual hold object first.
+		-- The old implementation waited on Note.Parent, which can remain
+		-- alive for a few frames after the short hold body is already gone.
+		if isHold then
+			local laneIndex = data.LaneIndex
+			local owner = holdOwners[laneIndex]
+			local body = getLongNoteBody(Note)
+			local finished = false
+			local connections = { }
+
+			local function finishHold()
+				if finished then
+					return
+				end
+
+				finished = true
+
+				for _, connection in connections do
+					connection:Disconnect()
+				end
+
+				releaseHold(laneIndex, owner)
+			end
+
+			connections[#connections + 1] =
+				Note:GetPropertyChangedSignal("Parent"):Connect(function()
+					if not Note.Parent then
+						finishHold()
+					end
+				end)
+
+			if body then
+				connections[#connections + 1] =
+					body:GetPropertyChangedSignal("Parent"):Connect(function()
+					if body.Parent ~= Note then
+						finishHold()
+					end
+				end)
+
+				connections[#connections + 1] =
+					body:GetPropertyChangedSignal("Visible"):Connect(function()
+					if not body.Visible then
+						finishHold()
+					end
+				end)
+			end
+
+			-- Same-frame state check, with no artificial delay.
+			if not Note.Parent
+				or body and (body.Parent ~= Note or not body.Visible)
+			then
+				finishHold()
+			end
+
+			while not finished do
+				wait()
+			end
 		end  
   
 		raceEvents(  
